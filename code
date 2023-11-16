@@ -1,0 +1,109 @@
+import requests
+import pandas as pd    
+import smtplib
+from email.message import EmailMessage
+import io
+import sys
+from datetime import datetime
+
+def construct_url(origin_airport, destination_airport, cabin, start_date, end_date, take=1000):
+    base_url = "https://seats.aero/partnerapi/search"
+    full_url = f"{base_url}?origin_airport={origin_airport}&destination_airport={destination_airport}&cabin={cabin}&start_date={start_date}&end_date={end_date}&take={take}"
+    return full_url
+
+# Get user input
+origin_airport = sys.argv[1].upper()
+destination_airport = sys.argv[2]
+# Convert the string to a list of uppercase airport codes
+destination_airports =  ', '.join([airport.strip().upper() for airport in destination_airport.split()])
+cabin = 'economy'
+start_date = datetime.strptime(sys.argv[3], '%b %d, %Y at %I:%M %p').date()
+end_date = datetime.strptime(sys.argv[4], '%b %d, %Y at %I:%M %p').date()
+take = 1000
+
+# Construct the URL
+url = construct_url(origin_airport, destination_airports, cabin, start_date, end_date, take)
+
+headers = {
+    "accept": "application/json",
+    "Partner-Authorization": "YOUR_API_KEY"
+}
+
+response = requests.get(url, headers=headers)
+
+data = response.json()
+
+flight_data = []
+for flight in data['data']:
+    flight_info = {
+        "Flight ID": flight['ID'],
+        "Origin Airport": flight['Route']['OriginAirport'],
+        "Destination Airport": flight['Route']['DestinationAirport'],
+        "Date": flight['Date'],
+        "Economy Mileage Cost": flight['YMileageCost'],
+        "Economy Award Seats Remaining": flight['YRemainingSeats'],
+        "Business Class Mileage Cost": flight['JMileageCost'],
+        "Business Class Award Seats Remaining": flight['JRemainingSeats'],
+        "Award Program": flight['Source']
+    }
+    flight_data.append(flight_info)
+
+def get_primary_booking_link(trip_id):
+    url = f"https://seats.aero/partnerapi/trips/{trip_id}"
+    headers = {
+    "accept": "application/json",
+    "Partner-Authorization": "YOUR_API_KEY"
+}
+    response = requests.get(url, headers=headers)
+    data = response.json()
+
+
+    # Iterate over the booking_links list
+    for link in data['booking_links']:
+        # Check if the primary property is true
+        if link['primary']:
+            # Return the link
+            return link['link']
+
+    # Return None if no primary link is found
+    return None
+
+# Convert the list of dictionaries to a pandas DataFrame
+df = pd.DataFrame(flight_data)
+# Add new columns to the DataFrame for booking link
+df["Booking Link"] = df["Flight ID"].apply(get_primary_booking_link)
+df.drop(columns=["Flight ID"], inplace=True)
+
+
+# Convert the "Economy Mileage Cost" column to integers for proper sorting
+df["Economy Mileage Cost"] = df["Economy Mileage Cost"].astype(int)
+
+# Group by "Date" and "Destination Airport" and then sort within each group by "Economy Mileage Cost"
+df = df.sort_values(by=["Destination Airport", "Economy Mileage Cost"], 
+                           ascending=[True, True])
+
+# Send dataframe as body of email 
+
+class email_notification:
+
+    def email_alert(subject, body, to):
+        msg = EmailMessage()
+        html_table = df.to_html()
+        msg.set_content(html_table, subtype='html')
+        msg['subject'] = subject
+        msg['to'] = to
+        user = 'YOUR_EMAIL'
+        msg['from'] = user
+        password = 'YOUR_EMAIL_PASSWORD'
+
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(user, password)
+        server.send_message(msg)
+
+        server.quit()
+
+email_notification.email_alert(subject= f"Flight award availability for {origin_airport} to {destination_airports} from {start_date} to {end_date} ",
+            body=df.to_html(),
+            to=['YOUR_EMAIL']
+        )
